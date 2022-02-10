@@ -1,0 +1,161 @@
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+
+      node-version:
+        required: false
+        type: string
+        default: '16'
+
+      pnpm-version:
+        required: false
+        type: string
+        default: '6'
+
+      remove-old-version:
+        required: false
+        type: boolean
+        default: false
+
+      environment:
+        required: true
+        type: string
+
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_ACCESS_SECRET:
+        required: false
+      AWS_BUCKET:
+        required: false
+
+jobs:
+  packaging:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      directory: ${{ steps.vars.outputs.directory }}
+      artifact: ${{ steps.vars.outputs.js-hash }}
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: pnpm/action-setup@v2.1.0
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - uses: actions/setup-node@v2
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+
+      - name: Setup vars
+        id: vars
+        run: |
+          hash=${GITHUB_SHA::12} && hash=${hash^^}
+          echo "::set-output name=js-hash::${hash}.js"
+          echo "::set-output name=css-hash::${hash}.css"
+          echo "::set-output name=directory::static/${GITHUB_REPOSITORY#*/}"
+
+      - run: pnpm install
+
+      - name: Build
+        run: pnpm -C packages/client build
+
+      - name: Versioning file
+        working-directory: packages/client/dist
+        run: |
+          mv bundle.js ${{ steps.vars.outputs.js-hash }}
+          mv bundle.css ${{ steps.vars.outputs.css-hash }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_ACCESS_SECRET }}
+          aws-region: eu-west-3
+
+      - name: Deploy
+        run: |
+          aws s3 sync ./packages/client/dist \
+            s3://${{ secrets.AWS_BUCKET }}/${{ steps.vars.outputs.directory }} \
+            --acl public-read
+
+  register:
+    needs: [packaging]
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - uses: actions/setup-node@v2
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_ACCESS_SECRET }}
+          aws-region: eu-west-3
+
+      - name: Set up
+        run: |
+          export BUCKET=${{ secrets.AWS_BUCKET }}
+          curl -s https://raw.githubusercontent.com/cph-scorer/ci/main/.github/utils/deploy-client/import-deployer.sh | bash
+
+      - name: Registering
+        run: |
+          export BUCKET=${{ secrets.AWS_BUCKET }}
+          export DIRECTORY=${{ needs.packaging.outputs.directory }}
+          export ARTIFACT=${{ needs.packaging.outputs.artifact }}
+          curl -s https://raw.githubusercontent.com/cph-scorer/ci/main/.github/utils/deploy-client/register.sh | bash
+
+      - name: Clean
+        run: |
+          pkill node
+          rm config.json payload.json
+
+  clean-old-version:
+    needs: [register, packaging]
+    if: ${{ inputs.remove-old-version }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - uses: actions/setup-node@v2
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_ACCESS_SECRET }}
+          aws-region: eu-west-3
+
+      - name: Setup vars
+        id: vars
+        run: |
+          echo "::set-output name=dir::${{ secrets.AWS_BUCKET }}/${{ needs.packaging.outputs.directory }}"
+
+      - name: List old version
+        id: list
+        run: |
+          aws s3 ls ${{ steps.vars.outputs.dir }} --recursive \
+            | grep -Ev '${{ needs.packaging.outputs.artifact }}|.css' \
+            | awk -F '/' '{print $3}' \
+            | cut -d '.' -f 1 > old.txt
+          cat old.txt
+
+      - name: Remove old version
+        continue-on-error: true
+        run: |
+          if [ ! $(cat old.txt | wc -l) -gt '0' ]; then exit 0; fi;
+          cat old.txt \
+            | awk '{file="s3://${{ steps.vars.outputs.dir }}/"$0".js"; print file}' \
+            | xargs -n 1 aws s3 rm
+          cat old.txt \
+            | awk '{file="s3://${{ steps.vars.outputs.dir }}/"$0".css"; print file}' \
+            | xargs -n 1 aws s3 rm

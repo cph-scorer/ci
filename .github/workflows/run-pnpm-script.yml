@@ -1,0 +1,48 @@
+name: Run pnpm script
+
+on:
+  workflow_call:
+    inputs:
+
+      script:
+        required: true
+        type: string
+
+      node-version:
+        required: false
+        type: string
+        default: '16'
+
+      pnpm-version:
+        required: false
+        type: string
+        default: '6'
+
+      package:
+        required: false
+        type: string
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: pnpm/action-setup@v2.1.0
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - uses: actions/setup-node@v2
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'pnpm'
+
+      - run: pnpm install
+
+      - name: Run script
+        run: |
+          if [ "${{ inputs.package }}" == "" ];
+            then pnpm ${{ inputs.script }} -r
+            else pnpm -C packages/${{ inputs.package }} ${{ inputs.script }}
+          fi

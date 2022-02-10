@@ -1,0 +1,6 @@
+{
+    "manifestFormat": "importmap",
+    "locations": {
+        "default": "s3://${BUCKET}/import-map.json"
+    }
+}
