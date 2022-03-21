@@ -2,7 +2,8 @@
 
 npm install -g import-map-deployer
 
-envsubst <<<$(curl https://raw.githubusercontent.com/cph-scorer/ci/main/.github/utils/deploy-client/config.json) > config.json
+curl -s https://raw.githubusercontent.com/cph-scorer/ci/main/.github/utils/deploy-client/config.json -o config.json
+envsubst < config.json | tee config.json > /dev/null
 
 import-map-deployer config.json &
 
